@@ -1,26 +1,26 @@
 #include <EEPROM.h>
 #include <Settings.h>
-#include <ArduinoNodeNetwork.h>
 
-#define BAUD_RATE 57600
+#define BAUD_RATE 38400
 #define ANALOG_SAMPLE_SIZE 500
 #define ANALOG_SAMPLE_DELAY 2
 #define DIGITAL_SAMPLE_DELAY 100
-
+#define IO_PINS_TOTAL 12
+#define IO_PINS_START 2
+#define RESET_DEFAULTS_PIN 4
 
 //***********************************************************************************************************
 // Global variables and structures
+
+char payload[50]; //Recieve Serial Buffer
 
 //**************************************
 //* Holds the settings for this system
 //**************************************
 struct IONodeDevSettings {
-  byte nodeId;
-  byte masterNodeId;
-  char devName[25];
-  boolean pinIsWrite[12];
-  boolean pinTriggerOn[12];
-  boolean pinTriggerOff[12];
+  boolean pinIsWrite[IO_PINS_TOTAL];
+  boolean pinTriggerOn[IO_PINS_TOTAL];
+  boolean pinTriggerOff[IO_PINS_TOTAL];
   
   int analogTirggerAverageAbove[6];
   int analogTirggerAverageBelow[6];
@@ -32,7 +32,7 @@ struct IONodeDevSettings {
 //* Holds the current and previous pin states
 //****************************************
 struct IOStatsStruct{
-  boolean pinIsOne[12];
+  boolean pinIsOne[IO_PINS_TOTAL];
   int analogAverage[6];
   long analogEnergy[6];
 };
@@ -46,7 +46,6 @@ long analogEnergyCalc[6];
 //* Init Global Variables
 //**************************************
 IONodeDevSettings mySettings;
-ArduinoNodeNetwork myNetwork;
 IOStatsStruct currentState;
 IOStatsStruct previousState;
 unsigned long LastAnalogSampleTime = 0;
@@ -70,16 +69,13 @@ void setup(){
   if (!EESettings::Load(&mySettings, sizeof(mySettings)) ){ LoadDefaultSettings(); }
   SetPinModeFromSettings();
   
-  //Init ArduinoNodeNetwork (with system id from settings) and announce to network master that I'm online
-  myNetwork.SetId( mySettings.nodeId );
-  myNetwork.SendNew( mySettings.masterNodeId,  "online" );
+  strcpy(payload, "");
   
 }
 
 
 //***********************************************************************************************************
 void loop(){
-  myNetwork.Update();
   ReadDigital();
   ReadAnalog();
 }
@@ -89,9 +85,21 @@ void loop(){
 //* Performs actions when serial data is recieved
 //**************************************
 void serialEvent(){ 
-  myNetwork.SerialRecieved(); 
-  checkRequests();
-  myNetwork.Update();
+  delay (20);  //Wait for full string to arrive hopefully
+  char serialByte[2];
+  serialByte[1] = '\0';
+
+  while (Serial.available()) {
+    serialByte[0] = (char) Serial.read();
+    if (serialByte[0] == '\n'){
+      handleRequest();
+      payload[0] = '\0';
+    }else{
+      strncat( payload, serialByte, sizeof(payload) );
+    }
+  }
+  
+  
 }
 
 
@@ -103,14 +111,14 @@ void ReadDigital(){
 
   
   //Move current settings into previous
-  for (byte i=0; i<12; i++){ previousState.pinIsOne[i] = currentState.pinIsOne[i]; }
+  for (byte i=0; i < IO_PINS_TOTAL; i++){ previousState.pinIsOne[i] = currentState.pinIsOne[i]; }
   
   //Read new states for digital & send Triggers
   char valBuff[3];
   char strBuff[20];
   
-  for (byte i=0; i<12; i++){ 
-    currentState.pinIsOne[i] = digitalRead(i+2);
+  for (byte i=0; i < IO_PINS_TOTAL; i++){ 
+    currentState.pinIsOne[i] = digitalRead(i + IO_PINS_START);
     
     //Check for pin state change
     if (LastDigitalSampleTime != 0 && currentState.pinIsOne[i] != previousState.pinIsOne[i]){
@@ -118,16 +126,16 @@ void ReadDigital(){
       
       //Check for on trigger
       if (mySettings.pinTriggerOn[i] && currentState.pinIsOne[i]){
-        strcpy(strBuff, "TRIGGER ON:");
+        strcpy(strBuff, "TRIGGER:ON PIN:");
         strcat(strBuff, valBuff);
-        myNetwork.SendNew(mySettings.masterNodeId, strBuff);
+        Serial.println(strBuff);
       }
       
       //Check for off trigger
       if (mySettings.pinTriggerOff[i] && !currentState.pinIsOne[i]){
-        strcpy(strBuff, "TRIGGER OFF:");
+        strcpy(strBuff, "TRIGGER:OFF PIN:");
         strcat(strBuff, valBuff);
-        myNetwork.SendNew(mySettings.masterNodeId, strBuff);
+        Serial.println(strBuff);
       }
     }
   }
@@ -186,6 +194,7 @@ void ReadAnalog(){
 void CheckAnalogTriggers(){
   char strBuff[20];
   char valBuff[4];
+  char valBuff2[8];
 
   for (int i=0; i<6; i++){
     itoa(i, valBuff, 10);
@@ -193,33 +202,45 @@ void CheckAnalogTriggers(){
     //Check average above trigger
     if (previousState.analogAverage[i] < mySettings.analogTirggerAverageAbove[i] &&
         currentState.analogAverage[i] > mySettings.analogTirggerAverageAbove[i]){
-      strcpy(strBuff, "TRIGGER AA:");
+      strcpy(strBuff, "TRIGGER:AA PIN:");
       strcat(strBuff, valBuff);
-      myNetwork.SendNew( mySettings.masterNodeId, strBuff);     
+      strcat(strBuff, " V:");
+      itoa(currentState.analogAverage[i], valBuff2, 10);
+      strcat(strBuff, valBuff2);
+      Serial.println(strBuff);     
     }
     
     //Check average below trigger
     if (previousState.analogAverage[i] > mySettings.analogTirggerAverageBelow[i] &&
         currentState.analogAverage[i] < mySettings.analogTirggerAverageBelow[i]){
-      strcpy(strBuff, "TRIGGER AB:");
+      strcpy(strBuff, "TRIGGER:AB PIN:");
       strcat(strBuff, valBuff);
-      myNetwork.SendNew( mySettings.masterNodeId, strBuff);     
+      strcat(strBuff, " V:");
+      itoa(currentState.analogAverage[i], valBuff2, 10);
+      strcat(strBuff, valBuff2);
+      Serial.println(strBuff);     
     }
     
     //Check energy above trigger
     if (previousState.analogEnergy[i] < mySettings.analogTriggerEnergyAbove[i] &&
         currentState.analogEnergy[i] > mySettings.analogTriggerEnergyAbove[i]){
-      strcpy(strBuff, "TRIGGER EA:");
+      strcpy(strBuff, "TRIGGER:EA PIN:");
       strcat(strBuff, valBuff);
-      myNetwork.SendNew( mySettings.masterNodeId, strBuff);     
+      strcat(strBuff, " V:");
+      itoa(currentState.analogEnergy[i], valBuff2, 10);
+      strcat(strBuff, valBuff2);
+      Serial.println(strBuff);     
     }
     
     //Check energy below trigger
     if (previousState.analogEnergy[i] > mySettings.analogTriggerEnergyBelow[i] &&
         currentState.analogEnergy[i] < mySettings.analogTriggerEnergyBelow[i]){
-      strcpy(strBuff, "TRIGGER EB:");
+      strcpy(strBuff, "TRIGGER:EB PIN:");
       strcat(strBuff, valBuff);
-      myNetwork.SendNew( mySettings.masterNodeId, strBuff);     
+      strcat(strBuff, " V:");
+      itoa(currentState.analogEnergy[i], valBuff2, 10);
+      strcat(strBuff, valBuff2);
+      Serial.println(strBuff);     
     }    
   }
 }
@@ -230,39 +251,29 @@ void CheckAnalogTriggers(){
 //**************************************
 //* Analizes packet payload for commands
 //**************************************
-void checkRequests(){
-  //Look to see if a payload is avilable
-  byte pNum = myNetwork.GetNextRequestPacket();
-  if (pNum == 255){ return; }
+void handleRequest(){
   
-  //Get pinter to the payload and determine command if any
-  char * payload = myNetwork.GetPayloadPointer( pNum );
   boolean cmdFound = false;
   
-  if ( instr(payload, "s_id") ){ cmdFound = true; CmdSetId( payload ); strcpy( payload, "OK" ); }
-  if ( instr(payload, "ping") ){ cmdFound = true; strcpy( payload, "pong" ); }
-  if ( instr(payload, "type") ){ cmdFound = true; strcpy( payload, "OK Analog Node" ); }
-  if ( instr(payload, "s_MN") ){ cmdFound = true; CmdSetMasterNode( payload ); strcpy( payload, "OK" ); }
-  if ( instr(payload, "g_SN") ){ cmdFound = true; CmdGetSystemName( payload ); }
-  if ( instr(payload, "s_SN") ){ cmdFound = true; CmdSetSystemName( payload ); strcpy( payload, "OK" ); }
+  if ( instr(payload, "type") ){ cmdFound = true; strcpy( payload, "OK:type Analog Node" ); }
   
-  if ( instr(payload, "s_AA") ){ cmdFound = true; CmdSetAnalogAbove( payload ); strcpy( payload, "OK" ); }
-  if ( instr(payload, "s_AB") ){ cmdFound = true; CmdSetAnalogBelow( payload ); strcpy( payload, "OK" ); }
-  if ( instr(payload, "s_EA") ){ cmdFound = true; CmdSetEnergyAbove( payload ); strcpy( payload, "OK" ); }
-  if ( instr(payload, "s_EB") ){ cmdFound = true; CmdSetEnergyBelow( payload ); strcpy( payload, "OK" ); }
-  if ( instr(payload, "s_PM") ){ cmdFound = true; CmdSetPinMode( payload ); strcpy( payload, "OK" ); }
-  if ( instr(payload, "s_P1") ){ cmdFound = true; CmdSetPinTriggerOn( payload ); strcpy( payload, "OK" ); }
-  if ( instr(payload, "s_P0") ){ cmdFound = true; CmdSetPinTriggerOff( payload ); strcpy( payload, "OK" ); }
-  if ( instr(payload, "s_PS") ){ cmdFound = true; CmdSetPinState( payload ); strcpy( payload, "OK" ); }
+  if ( instr(payload, "s_AA") ){ cmdFound = true; CmdSetAnalogAbove( payload ); strcpy( payload, "OK:s_AA" ); }
+  if ( instr(payload, "s_AB") ){ cmdFound = true; CmdSetAnalogBelow( payload ); strcpy( payload, "OK:s_AB" ); }
+  if ( instr(payload, "s_EA") ){ cmdFound = true; CmdSetEnergyAbove( payload ); strcpy( payload, "OK:s_EA" ); }
+  if ( instr(payload, "s_EB") ){ cmdFound = true; CmdSetEnergyBelow( payload ); strcpy( payload, "OK:s_EB" ); }
+  if ( instr(payload, "s_PM") ){ cmdFound = true; CmdSetPinMode( payload ); strcpy( payload, "OK:s_PM" ); }
+  if ( instr(payload, "s_P1") ){ cmdFound = true; CmdSetPinTriggerOn( payload ); strcpy( payload, "OK:s_P1" ); }
+  if ( instr(payload, "s_P0") ){ cmdFound = true; CmdSetPinTriggerOff( payload ); strcpy( payload, "OK:s_P2" ); }
+  if ( instr(payload, "s_PS") ){ cmdFound = true; CmdSetPinState( payload ); strcpy( payload, "OK:s_PS" ); }
   if ( instr(payload, "g_PS") ){ cmdFound = true; CmdGetPinStatus( payload ); }
   if ( instr(payload, "g_AV") ){ cmdFound = true; CmdGetAnalogValues( payload ); }
-  if ( instr(payload, "g_SP") ){ cmdFound = true; CmdGetSettingsPin( payload ); }
+  if ( instr(payload, "g_PM") ){ cmdFound = true; CmdGetSettingsPin( payload ); }
   if ( instr(payload, "g_SA") ){ cmdFound = true; CmdGetSettingsAnalog( payload ); }
   if ( instr(payload, "?") ){ cmdFound = true; CmdShowCommands( payload );  strcpy( payload, "OK" ); }
   
   
   if (!cmdFound){ Serial.println(payload); strcpy( payload, "Unkown Command" ); }
-  myNetwork.SendReply( pNum );  
+  Serial.println( payload );
 }
 
 
@@ -270,49 +281,6 @@ void checkRequests(){
 //***********************************************************************************************************
 // Commands
 
-//**************************************
-//* Command s_MN: Set Master Node
-//**************************************
-void CmdSetMasterNode( char * payload ){
-  int id = getIntFromStr(payload, 4, '\0', true);
-  mySettings.masterNodeId = id;
-  EESettings::Save(&mySettings, sizeof(mySettings) );
-}
-
-
-//**************************************
-//* Command g_SN: get system name
-//**************************************
-void CmdGetSystemName( char * payload ){
-  strcpy( payload, "NAME: ");
-  strcat( payload, mySettings.devName);
-}
-
-//**************************************
-//* Command s_SN: set system name
-//**************************************
-void CmdSetSystemName( char * payload ){
-  int counter=0;
-  byte thisByte = '\0';
-  while (true){
-    thisByte = payload[counter+4];
-    if (thisByte == '\0'){ break; }
-    mySettings.devName[counter] = thisByte;
-    counter ++;
-  }
-  mySettings.devName[counter] = '\0';
-}
-
-//**************************************
-//* Command s_ID: Set Device ID
-//**************************************
-void CmdSetId( char * payload ){
-  char buffer[4];
-  byte id = getIntFromStr(payload, 4, '\0', true);
-  mySettings.nodeId = id;
-  EESettings::Save(&mySettings, sizeof(mySettings) );
-  myNetwork.SetId( mySettings.nodeId );
-}
 
 //**************************************
 //* Command s_AA: SetAnalogAbove
@@ -358,7 +326,7 @@ void CmdSetEnergyBelow(char * payload){
 //* Command s_PM: SetPinMode
 //**************************************
 void CmdSetPinMode(char * payload){
-  for (byte i=0; i<12; i++){ 
+  for (byte i=0; i < IO_PINS_TOTAL; i++){ 
     mySettings.pinIsWrite[i] = (payload[i+4] == '1')? true : false; 
   }
   SetPinModeFromSettings();
@@ -369,7 +337,7 @@ void CmdSetPinMode(char * payload){
 //* Command s_P1: SetPinTriggerOn
 //**************************************
 void CmdSetPinTriggerOn(char * payload){
-  for (byte i=0; i<12; i++){ mySettings.pinTriggerOn[i] = (payload[i+4] == '1')? true : false; }
+  for (byte i=0; i < IO_PINS_TOTAL; i++){ mySettings.pinTriggerOn[i] = (payload[i+4] == '1')? true : false; }
   EESettings::Save(&mySettings, sizeof(mySettings) );
 }
 
@@ -377,7 +345,7 @@ void CmdSetPinTriggerOn(char * payload){
 //* Command s_P0: SetPinTriggerOff
 //**************************************
 void CmdSetPinTriggerOff(char * payload){
-  for (byte i=0; i<12; i++){ mySettings.pinTriggerOff[i] = (payload[i+4] == '1')? true : false; }
+  for (byte i=0; i < IO_PINS_TOTAL; i++){ mySettings.pinTriggerOff[i] = (payload[i+4] == '1')? true : false; }
   EESettings::Save(&mySettings, sizeof(mySettings) );
 }
 
@@ -385,9 +353,9 @@ void CmdSetPinTriggerOff(char * payload){
 //* Command s_PS: SetPinState
 //**************************************
 void CmdSetPinState(char * payload){
-  for (byte i=0; i<12; i++){ 
+  for (byte i=0; i < IO_PINS_TOTAL; i++){ 
     boolean state = (payload[i+4] == '1')? true : false;
-    if (mySettings.pinIsWrite[i] ){ digitalWrite (i+2, state); }
+      if (mySettings.pinIsWrite[i] ){ digitalWrite (i + IO_PINS_START, state); }
   }
 }
 
@@ -395,11 +363,11 @@ void CmdSetPinState(char * payload){
 //* Command g_PS: GetPinStatus - returns digital values
 //**************************************
 void CmdGetPinStatus( char * payload ){ 
-  strcpy(payload, "OK ");
+  strcpy(payload, "OK:g_PS V:");
   char buffer[2];
   buffer[1] = '\0';
   
-  for (byte i=0; i<12; i++){
+  for (byte i=0; i < IO_PINS_TOTAL; i++){
     buffer[0] = currentState.pinIsOne[i] ? '1' : '0';
     strcat(payload, buffer);     
   }
@@ -414,7 +382,7 @@ void CmdGetAnalogValues( char * payload ){
   if (id < 0 || id > 5){ strcpy(payload, "ID OUT OF RANGE"); return; }
   
   char buffer[10];
-  strcpy(payload, "OK ");
+  strcpy(payload, "OK:g_AV ");
   
   strcat(payload, "PIN:");
   itoa(id, buffer, 10);
@@ -432,30 +400,30 @@ void CmdGetAnalogValues( char * payload ){
 
 
 //**************************************
-//* Command g_SP: Get Settings for Pins
+//* Command g_PM: Get Settings for Pins
 //**************************************
 void CmdGetSettingsPin( char * payload ){ 
-  strcpy (payload, "OK ");
+  strcpy (payload, "OK:g_PM ");
   char buffer[2];
   buffer[1] = '\0';
   
   //Pin mode
   strcat(payload, "M:");
-  for (byte i=0; i<12; i++){
+  for (byte i=0; i < IO_PINS_TOTAL; i++){
     buffer[0] = mySettings.pinIsWrite[i] ? '1': '0';
     strcat(payload, buffer );
   }
   
   //Pin on trigger
   strcat(payload, " T1:");
-  for (byte i=0; i<12; i++){
+  for (byte i=0; i < IO_PINS_TOTAL; i++){
     buffer[0] = mySettings.pinTriggerOn[i] ? '1': '0';
     strcat(payload, buffer );
   }
   
   //Pin off trigger
   strcat(payload, " T0:");
-  for (byte i=0; i<12; i++){
+  for (byte i=0; i < IO_PINS_TOTAL; i++){
     buffer[0] = mySettings.pinTriggerOff[i] ? '1': '0';
     strcat(payload, buffer );
   }
@@ -470,7 +438,7 @@ void CmdGetSettingsAnalog( char * payload ){
   if (id < 0 || id > 5){ strcpy(payload, "ID OUT OF RANGE"); return; }
   
   char buffer[10];
-  strcpy(payload, "OK ");
+  strcpy(payload, "OK:g_SA ");
   
   strcat(payload, "PIN:");
   itoa(id, buffer, 10);
@@ -502,13 +470,7 @@ void CmdGetSettingsAnalog( char * payload ){
 void CmdShowCommands( char * payload ){ 
   Serial.println( F("=== Command Help ===") );
   Serial.println( F("Items in [] represent variables and are not a litteral part of the command") );
-  Serial.println( F("ping - responds pong)") );
   Serial.println( F("type - responds with device type )") );
-  
-  Serial.println( F("s_id - Set ID (2 byte hex), responds OK") );
-  Serial.println( F("s_MN - Set Master Node ID (2 byte hex) ") );
-  Serial.println( F("s_SN - Set System Name") );
-  Serial.println( F("g_SN - Get System Name") );
   Serial.println("");
   Serial.println( F("s_AA[id]:[value] - Set triiger for Average Analog Above port id to value") );
   Serial.println( F("s_AB[id]:[value] - Set trigger for Average Analog Below port id to value") );
@@ -521,7 +483,7 @@ void CmdShowCommands( char * payload ){
   Serial.println( F("") );
   Serial.println( F("g_PS - get pin status, returns pin input/output values for pins 2 - 13") );
   Serial.println( F("g_AV[id] - get analog vaues for id, returns avg:xxxx eng:xxxx") );
-  Serial.println( F("g_SP - get Settings Pins, returns input or output mode for pins 2 - 13") );
+  Serial.println( F("g_PM - get Settings Pins, returns input or output mode for pins 2 - 13") );
   Serial.println( F("g_SA[id] - returns all analog settings for a given port") );
   Serial.println("");
   
@@ -536,8 +498,8 @@ void CmdShowCommands( char * payload ){
 // Sets pin mode to input our output based on settings
 //**************************************
 void  SetPinModeFromSettings(){
-  for (byte i=0; i<12; i++){
-    if ( mySettings.pinIsWrite[i] ){ pinMode(i+2, OUTPUT); }else{ pinMode(i+2, INPUT_PULLUP); }
+  for (byte i=0; i < IO_PINS_TOTAL; i++){
+    if ( mySettings.pinIsWrite[i] ){ pinMode(i+IO_PINS_START, OUTPUT); }else{ pinMode(i+IO_PINS_START, INPUT_PULLUP); }
   }
 }
 
@@ -546,10 +508,7 @@ void  SetPinModeFromSettings(){
 //* Load Default Settings for this system
 //**************************************
 void LoadDefaultSettings(){
-    mySettings.nodeId=255;
-    mySettings.masterNodeId = 0;
-    strcpy(mySettings.devName, "UNKOWN DEVICE");
-    for (int i=0; i<12; i++){
+    for (int i=0; i < IO_PINS_TOTAL; i++){
       mySettings.pinIsWrite[i] = false; 
       mySettings.pinTriggerOn[i] = false; 
       mySettings.pinTriggerOff[i] = false;
@@ -620,9 +579,9 @@ boolean instr(const char * haystack, const char * needle){
 //Checks to see if pin 2 is held low at startup
 //**************************************
 void CheckDefaultLoadReq(){
-  pinMode(2, INPUT_PULLUP);
+  pinMode(RESET_DEFAULTS_PIN, INPUT_PULLUP);
   delay(200);
-  if (digitalRead(2) == HIGH){ return; }  //Skip setup
+  if (digitalRead(RESET_DEFAULTS_PIN) == HIGH){ return; }  //Skip setup
   
   Serial.println( F("Reseting defaults....") );
   LoadDefaultSettings();
